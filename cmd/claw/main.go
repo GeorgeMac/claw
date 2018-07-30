@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"strconv"
 	"text/tabwriter"
@@ -14,7 +13,6 @@ import (
 	etcdnamespace "github.com/coreos/etcd/clientv3/namespace"
 	"github.com/georgemac/claw/queue"
 	"github.com/georgemac/claw/task"
-	"github.com/oklog/ulid"
 )
 
 const namespace = "github.com/georgemac/claw/"
@@ -39,22 +37,14 @@ func main() {
 				os.Exit(1)
 			}
 
-			var (
-				t       = time.Now()
-				entropy = rand.New(rand.NewSource(t.UnixNano()))
-				ulid    = ulid.MustNew(ulid.Timestamp(t), entropy)
-			)
-
 			conc, err := strconv.ParseInt(os.Args[3], 10, 32)
 			if err != nil {
 				log.Fatal(err)
 			}
 
-			if err := queue.Schedule(ctxt, etcdnamespace.NewKV(cli.KV, namespace), task.Task{
-				ID:          ulid.String(),
-				QueueID:     os.Args[2],
-				Concurrency: int(conc),
-			}); err != nil {
+			task := task.New(os.Args[2], nil, task.WithConcurrency(int(conc)))
+
+			if err := queue.Schedule(ctxt, etcdnamespace.NewKV(cli.KV, namespace), task); err != nil {
 				log.Fatal(err)
 			}
 
