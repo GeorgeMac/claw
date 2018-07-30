@@ -78,11 +78,11 @@ func (l ListOptions) Apply(c *ListOptionConfig) {
 }
 
 type ListOptionConfig struct {
-	queueName *string
+	namespace string
 }
 
-func WithQueue(queue string) ListOption {
-	return func(conf *ListOptionConfig) { conf.queueName = &queue }
+func WithNamespace(namespace string) ListOption {
+	return func(c *ListOptionConfig) { c.namespace = namespace }
 }
 
 type Stats struct {
@@ -93,49 +93,52 @@ type Stats struct {
 }
 
 func List(ctxt context.Context, kv clientv3.KV, options ...ListOption) (map[string]Stats, error) {
-	var conf ListOptionConfig
+	conf := ListOptionConfig{
+		namespace: "github.com/georgemac/claw/",
+	}
 
 	ListOptions(options).Apply(&conf)
 
-	if conf.queueName == nil {
-		res, err := kv.Get(ctxt, "github.com/georgemac/claw/", clientv3.WithPrefix(), clientv3.WithLimit(0))
-		if err != nil {
-			return nil, err
-		}
-
-		all := map[string]Stats{}
-
-		for _, kv := range res.Kvs {
-			var (
-				key   = strings.TrimPrefix(string(kv.Key), "github.com/georgemac/claw/")
-				parts = strings.Split(key, "/")
-				// {{ state }}
-				state = parts[0]
-				// {{ queue }}
-				queue = parts[1]
-				s, _  = all[queue]
-			)
-
-			// set queue name
-			s.QueueName = queue
-
-			// update state counts
-			switch state {
-			case "queued":
-				s.QueuedCount += 1
-			case "running":
-				s.RunningCount += 1
-			case "claim":
-				s.ClaimedCount += 1
-			}
-
-			all[queue] = s
-		}
-
-		return all, nil
+	res, err := kv.Get(ctxt, conf.namespace, clientv3.WithPrefix(), clientv3.WithLimit(0))
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, errors.New("not implemented")
+	all := map[string]Stats{}
+
+	for _, kv := range res.Kvs {
+		var (
+			key   = strings.TrimPrefix(string(kv.Key), conf.namespace)
+			parts = strings.Split(key, "/")
+		)
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		var (
+			state = parts[len(parts)-3]
+			queue = parts[len(parts)-2]
+			s, _  = all[queue]
+		)
+
+		// set queue name
+		s.QueueName = queue
+
+		// update state counts
+		switch state {
+		case "queued":
+			s.QueuedCount += 1
+		case "running":
+			s.RunningCount += 1
+		case "claim":
+			s.ClaimedCount += 1
+		}
+
+		all[queue] = s
+	}
+
+	return all, nil
 }
 
 // Schedule enqueues a provided task to be performed by a worker
