@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	clawNS      = "theclaw.io/"
 	queuedNS    = "queued/"
 	runningNS   = "running/"
 	countNS     = "count/"
@@ -66,6 +65,77 @@ func countKey(t task.Task) string {
 // claimKey is /claim/{{ .QueueID }}/{{ .ID }}
 func claimKey(t task.Task) string {
 	return path.Join(claimNS, t.QueueID, t.ID)
+}
+
+type ListOption func(*ListOptionConfig)
+
+type ListOptions []ListOption
+
+func (l ListOptions) Apply(c *ListOptionConfig) {
+	for _, opt := range l {
+		opt(c)
+	}
+}
+
+type ListOptionConfig struct {
+	queueName *string
+}
+
+func WithQueue(queue string) ListOption {
+	return func(conf *ListOptionConfig) { conf.queueName = &queue }
+}
+
+type Stats struct {
+	QueueName    string
+	QueuedCount  int
+	RunningCount int
+	ClaimedCount int
+}
+
+func List(ctxt context.Context, kv clientv3.KV, options ...ListOption) (map[string]Stats, error) {
+	var conf ListOptionConfig
+
+	ListOptions(options).Apply(&conf)
+
+	if conf.queueName == nil {
+		res, err := kv.Get(ctxt, "github.com/georgemac/claw/", clientv3.WithPrefix(), clientv3.WithLimit(0))
+		if err != nil {
+			return nil, err
+		}
+
+		all := map[string]Stats{}
+
+		for _, kv := range res.Kvs {
+			var (
+				key   = strings.TrimPrefix(string(kv.Key), "github.com/georgemac/claw/")
+				parts = strings.Split(key, "/")
+				// {{ state }}
+				state = parts[0]
+				// {{ queue }}
+				queue = parts[1]
+				s, _  = all[queue]
+			)
+
+			// set queue name
+			s.QueueName = queue
+
+			// update state counts
+			switch state {
+			case "queued":
+				s.QueuedCount += 1
+			case "running":
+				s.RunningCount += 1
+			case "claim":
+				s.ClaimedCount += 1
+			}
+
+			all[queue] = s
+		}
+
+		return all, nil
+	}
+
+	return nil, errors.New("not implemented")
 }
 
 // Schedule enqueues a provided task to be performed by a worker
@@ -327,9 +397,41 @@ func finish(rootCtxt context.Context, kv clientv3.KV, t task.Task) error {
 	return nil
 }
 
-// FeedRunning watches for tasks tasks being scheduled in the backing etcd and feeds
+// GetWating watches for tasks tasks being scheduled in the backing etcd and feeds
 // them into the provided tasks channel
-func FeedRunning(ctxt context.Context, watcher clientv3.Watcher, tasks chan<- task.Task) {
+func GetWaiting(ctxt context.Context, kv clientv3.KV, tasks chan<- task.Task) error {
+	resp, err := kv.Get(ctxt, runningNS, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+
+	for _, running := range resp.Kvs {
+		// found task in running state
+		var task task.Task
+		if err := json.Unmarshal(running.Value, &task); err != nil {
+			log.Println("error unmarshalling task", err)
+			continue
+		}
+
+		// attempt to fetch claim for task
+		claim, err := kv.Get(ctxt, claimKey(task))
+		if err != nil {
+			return err
+		}
+
+		// if a claim cannot be found
+		if claim.Count < 1 {
+			// send it for claiming
+			tasks <- task
+		}
+	}
+
+	return nil
+}
+
+// WatchRunning watches for tasks tasks being scheduled in the backing etcd and feeds
+// them into the provided tasks channel
+func WatchRunning(ctxt context.Context, watcher clientv3.Watcher, tasks chan<- task.Task) {
 	log.Println("begin watching")
 	ch := watcher.Watch(ctxt, runningNS, clientv3.WithPrefix())
 	for resp := range ch {
@@ -341,17 +443,14 @@ func FeedRunning(ctxt context.Context, watcher clientv3.Watcher, tasks chan<- ta
 		if len(resp.Events) > 0 {
 			for _, ev := range resp.Events {
 				if ev.IsCreate() {
-					// given the created key is not a claim
-					if !strings.HasSuffix(string(ev.Kv.Key), "__claim") && !strings.HasSuffix(string(ev.Kv.Key), "__count") {
-						// new running job!
-						var task task.Task
-						if err := json.Unmarshal(ev.Kv.Value, &task); err != nil {
-							log.Println("error unmarshalling task", err)
-							continue
-						}
-
-						tasks <- task
+					// new running job!
+					var task task.Task
+					if err := json.Unmarshal(ev.Kv.Value, &task); err != nil {
+						log.Println("error unmarshalling task", err)
+						continue
 					}
+
+					tasks <- task
 				}
 			}
 		}
