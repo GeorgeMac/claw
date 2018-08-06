@@ -1,7 +1,7 @@
 _The Claw :point_up: ..._
 --------
 
-An etcd backed worker queue. Currently built as a library for projects writtin in the Go programming language.
+An etcd backed worker queue. Currently built as a library for projects written in the Go programming language.
 
 Please note that I consider this project very much an experiment. It will likely remain volitile or eventually dissapear. If it solves something for you that is super amazing and I would love to talk to you about what that problem is and how it solves it.
 
